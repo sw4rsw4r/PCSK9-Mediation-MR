@@ -1,0 +1,296 @@
+---
+title: "PCSK9-Mediation-MR"
+author: "Seongwon Hwang"
+date: "08-11-2026"
+output:
+  html_document:
+    toc: true
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Initialization and package loading
+
+The paper used R 4.4.3, MendelianRandomization 0.10.0, PLINK 1.9 and Python 3.12. To install the packages used here, run the following in a terminal.
+
+```bash
+conda env create -f env.yml
+conda activate PCSK9-Mediation-MR
+```
+
+```{r}
+suppressMessages({
+  library(dplyr)
+  library(ggplot2)
+  library(patchwork)
+  library(MendelianRandomization)
+})
+```
+
+# Data
+
+Plasma PCSK9 associations are the deCODE SomaScan summary for aptamer 5231_79. LDL-C associations are the European ancestry GLGC meta-analysis (GCST90239658). CAD associations are the Aragam meta-analysis (GCST90132314). Linkage disequilibrium is the 1000 Genomes Phase 3 European panel, 503 individuals.
+
+Those full summary files are not in this repository. `data/README.md` says where to put them and which scripts rebuild the instrument tables. The chunks below use the variant-level tables in `summary_results`, which are enough to regenerate the estimates and the two figures.
+
+```{r}
+# python scripts/extract_ldl_gws.py
+# python scripts/clump_ldl_by_z.py
+# python scripts/extract_pcsk9_window.py
+# Rscript scripts/select_cis_instruments.R
+# python scripts/extract_pcsk9_setting1.py
+# python scripts/extract_pcsk9_setting2.py
+```
+
+```{r}
+num <- function(x) as.numeric(x)
+cis <- read.delim("summary_results/pcsk9_instruments.tsv", stringsAsFactors = FALSE)
+s1 <- read.delim("summary_results/ldl_setting1.tsv", stringsAsFactors = FALSE)
+s2 <- read.delim("summary_results/ldl_setting2.tsv", stringsAsFactors = FALSE)
+removed <- read.delim("summary_results/setting1_removed.tsv", stringsAsFactors = FALSE)
+dropped <- read.delim("summary_results/setting2_mvmr_dropped.tsv", stringsAsFactors = FALSE)
+c(cis = nrow(cis), setting1 = nrow(s1), setting2 = nrow(s2),
+  setting1_removed = nrow(removed), setting2_ld_dropped = nrow(dropped))
+```
+
+Setting 1 drops the nine LDL-C instruments in `setting1_removed.tsv`. Four are inside the PCSK9 window or are themselves PCSK9 instruments, and five have r² of at least 0.001 with a PCSK9 instrument within 10 Mb. Setting 2 keeps all 394 LDL-C instruments for the univariable model. Its MVMR leaves out the two LDL-C instruments in `setting2_mvmr_dropped.tsv`, because each is a second copy of a PCSK9 instrument, and also leaves out rs551473284, which has no PCSK9 association.
+
+# Estimation of total, indirect and direct effects
+
+The PCSK9 total effects are univariable inverse-variance weighted estimates from the 16 cis instruments, with multiplicative random effects. The same estimates are used in both settings. The two-step indirect effect is the product of the PCSK9 effect on LDL-C and the LDL-C effect on CAD. Its standard error is the delta-method standard error without the covariance term. The two-step direct effect, and the MVMR indirect effect, are each a difference of two estimates. The standard error of a difference is the square root of the sum of the two squared standard errors.
+
+```{r}
+se_from_ci <- function(lower, upper) (upper - lower) / (2 * 1.96)
+z_row <- function(estimate, se) {
+  data.frame(
+    estimate = estimate, se = se,
+    lower = estimate - 1.96 * se, upper = estimate + 1.96 * se,
+    p.value = 2 * pnorm(-abs(estimate / se)),
+    stringsAsFactors = FALSE
+  )
+}
+product_ci <- function(b1, s1, b2, s2) {
+  z_row(b1 * b2, sqrt(b2^2 * s1^2 + b1^2 * s2^2))
+}
+ivw <- function(bx, bxse, by, byse, snps) {
+  fit <- mr_ivw(mr_input(bx = bx, bxse = bxse, by = by, byse = byse, snps = snps), model = "random")
+  out <- z_row(as.numeric(fit@Estimate), se_from_ci(as.numeric(fit@CILower), as.numeric(fit@CIUpper)))
+  out$p.value <- as.numeric(fit@Pvalue)
+  out
+}
+run_mvmr <- function(sub) {
+  mv <- mr_mvinput(
+    bx = cbind(num(sub$beta_ldl), num(sub$beta_pqtl)),
+    bxse = cbind(num(sub$se_ldl), num(sub$se_pqtl)),
+    by = num(sub$beta_cad), byse = num(sub$se_cad),
+    snps = sub$rsid,
+    exposure = c("LDL-C", "PCSK9"),
+    outcome = "CAD"
+  )
+  fit <- mr_mvivw(mv, nx = c(mean(num(sub$n_ldl)), mean(num(sub$n_pqtl))))
+  list(
+    ldl = z_row(as.numeric(fit$Estimate[1]), se_from_ci(as.numeric(fit$CILower[1]), as.numeric(fit$CIUpper[1]))),
+    direct = z_row(as.numeric(fit$Estimate[2]), se_from_ci(as.numeric(fit$CILower[2]), as.numeric(fit$CIUpper[2]))),
+    cond_f_ldl = as.numeric(fit$CondFstat[1]),
+    cond_f_pcsk9 = as.numeric(fit$CondFstat[2]),
+    n = nrow(sub)
+  )
+}
+finite_pq <- function(d) {
+  d[is.finite(num(d$beta_pqtl)) & is.finite(num(d$se_pqtl)) & num(d$se_pqtl) > 0, ]
+}
+as_block <- function(d) {
+  data.frame(
+    rsid = d$rsid,
+    beta_ldl = num(d$beta_ldl), se_ldl = num(d$se_ldl),
+    beta_cad = num(d$beta_cad), se_cad = num(d$se_cad),
+    beta_pqtl = num(d$beta_pqtl), se_pqtl = num(d$se_pqtl),
+    n_ldl = num(d$n_ldl), n_pqtl = num(d$n_pqtl),
+    stringsAsFactors = FALSE
+  )
+}
+
+xm <- ivw(num(cis$beta_pqtl), num(cis$se_pqtl), num(cis$beta_ldl), num(cis$se_ldl), cis$rsid)
+xy <- ivw(num(cis$beta_pqtl), num(cis$se_pqtl), num(cis$beta_cad), num(cis$se_cad), cis$rsid)
+
+s1_uv_rows <- s1[is.finite(num(s1$beta_ldl)) & num(s1$se_ldl) > 0 &
+                   is.finite(num(s1$beta_cad)) & num(s1$se_cad) > 0, ]
+s2_uv_rows <- s2[is.finite(num(s2$beta_ldl)) & num(s2$se_ldl) > 0 &
+                   is.finite(num(s2$beta_cad)) & num(s2$se_cad) > 0, ]
+uv1 <- ivw(num(s1_uv_rows$beta_ldl), num(s1_uv_rows$se_ldl),
+           num(s1_uv_rows$beta_cad), num(s1_uv_rows$se_cad), s1_uv_rows$rsid)
+uv2 <- ivw(num(s2_uv_rows$beta_ldl), num(s2_uv_rows$se_ldl),
+           num(s2_uv_rows$beta_cad), num(s2_uv_rows$se_cad), s2_uv_rows$rsid)
+
+cis_block <- as_block(cis)
+s1_block <- as_block(finite_pq(s1))
+s2_block <- as_block(finite_pq(s2))
+s2_block <- s2_block[!s2_block$rsid %in% cis_block$rsid & !s2_block$rsid %in% dropped$ldl, ]
+stopifnot(!any(s1_block$rsid %in% cis_block$rsid))
+mv1 <- run_mvmr(bind_rows(s1_block, cis_block))
+mv2 <- run_mvmr(bind_rows(s2_block, cis_block))
+
+ind1 <- product_ci(xm$estimate, xm$se, uv1$estimate, uv1$se)
+ind2 <- product_ci(xm$estimate, xm$se, uv2$estimate, uv2$se)
+dir1 <- z_row(xy$estimate - ind1$estimate, sqrt(xy$se^2 + ind1$se^2))
+dir2 <- z_row(xy$estimate - ind2$estimate, sqrt(xy$se^2 + ind2$se^2))
+mind1 <- z_row(xy$estimate - mv1$direct$estimate, sqrt(xy$se^2 + mv1$direct$se^2))
+mind2 <- z_row(xy$estimate - mv2$direct$estimate, sqrt(xy$se^2 + mv2$direct$se^2))
+
+stopifnot(abs(xm$estimate - 0.401045921369879) < 1e-8)
+stopifnot(abs(xy$estimate - 0.247007179197188) < 1e-8)
+stopifnot(abs(uv1$estimate - 0.462433755536346) < 1e-8, nrow(s1_uv_rows) == 385)
+stopifnot(abs(uv2$estimate - 0.466165654943046) < 1e-8, nrow(s2_uv_rows) == 394)
+stopifnot(abs(mv1$ldl$estimate - 0.44656777912133) < 1e-8, mv1$n == 400)
+stopifnot(abs(mv2$ldl$estimate - 0.445020756030018) < 1e-8, mv2$n == 406)
+stopifnot(abs(mv1$direct$estimate - 0.0744987849339996) < 1e-8)
+stopifnot(abs(mv2$direct$estimate - 0.0691149283806699) < 1e-8)
+stopifnot(abs(mv1$cond_f_ldl - 7.2239003972247) < 1e-6)
+stopifnot(abs(mv2$cond_f_ldl - 7.36690531754066) < 1e-6)
+```
+
+```{r}
+paper <- bind_rows(
+  data.frame(setting = "Both", quantity = "PCSK9 on LDL-C, total", xm, n = 16, f_ldl = NA, f_pcsk9 = NA),
+  data.frame(setting = "Both", quantity = "PCSK9 on CAD, total", xy, n = 16, f_ldl = NA, f_pcsk9 = NA),
+  data.frame(setting = "Setting 1", quantity = "LDL-C on CAD, univariable", uv1, n = nrow(s1_uv_rows), f_ldl = NA, f_pcsk9 = NA),
+  data.frame(setting = "Setting 2", quantity = "LDL-C on CAD, univariable", uv2, n = nrow(s2_uv_rows), f_ldl = NA, f_pcsk9 = NA),
+  data.frame(setting = "Setting 1", quantity = "LDL-C on CAD, MVMR", mv1$ldl, n = mv1$n, f_ldl = mv1$cond_f_ldl, f_pcsk9 = mv1$cond_f_pcsk9),
+  data.frame(setting = "Setting 2", quantity = "LDL-C on CAD, MVMR", mv2$ldl, n = mv2$n, f_ldl = mv2$cond_f_ldl, f_pcsk9 = mv2$cond_f_pcsk9),
+  data.frame(setting = "Setting 1", quantity = "Indirect, two-step", ind1, n = 16, f_ldl = NA, f_pcsk9 = NA),
+  data.frame(setting = "Setting 2", quantity = "Indirect, two-step", ind2, n = 16, f_ldl = NA, f_pcsk9 = NA),
+  data.frame(setting = "Setting 1", quantity = "Indirect, MVMR", mind1, n = mv1$n, f_ldl = NA, f_pcsk9 = NA),
+  data.frame(setting = "Setting 2", quantity = "Indirect, MVMR", mind2, n = mv2$n, f_ldl = NA, f_pcsk9 = NA),
+  data.frame(setting = "Setting 1", quantity = "Direct, two-step", dir1, n = 16, f_ldl = NA, f_pcsk9 = NA),
+  data.frame(setting = "Setting 2", quantity = "Direct, two-step", dir2, n = 16, f_ldl = NA, f_pcsk9 = NA),
+  data.frame(setting = "Setting 1", quantity = "Direct, MVMR", mv1$direct, n = mv1$n, f_ldl = mv1$cond_f_ldl, f_pcsk9 = mv1$cond_f_pcsk9),
+  data.frame(setting = "Setting 2", quantity = "Direct, MVMR", mv2$direct, n = mv2$n, f_ldl = mv2$cond_f_ldl, f_pcsk9 = mv2$cond_f_pcsk9)
+)
+paper$proportion <- ifelse(grepl("^Indirect", paper$quantity), paper$estimate / xy$estimate, NA_real_)
+paper %>%
+  transmute(setting, quantity, n,
+            estimate = round(estimate, 3),
+            lower = round(lower, 3),
+            upper = round(upper, 3),
+            p = signif(p.value, 2),
+            proportion = round(100 * proportion))
+```
+
+# Figure 1
+
+```{r fig.width=9.6, fig.height=8.2}
+est <- paper
+ink <- c("Two-step" = "#2166ac", "MVMR" = "#aa0202", "Total" = "black")
+theme_fp <- theme_classic(base_size = 13) +
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(face = "bold", size = 13),
+    axis.text = element_text(colour = "black", size = 11.5),
+    axis.title.y = element_blank(),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 11.5),
+    panel.spacing = unit(1.4, "lines"),
+    plot.tag = element_text(face = "bold", size = 15)
+  )
+method_of <- function(q) ifelse(grepl("MVMR", q), "MVMR", ifelse(grepl("total$", q), "Total", "Two-step"))
+
+ldl <- est %>%
+  filter(grepl("^LDL-C on CAD", quantity)) %>%
+  mutate(method = method_of(quantity),
+         row = ifelse(method == "MVMR", "MVMR,\nadjusted for PCSK9", "Univariable IVW,\nfor the two-step method"),
+         row = factor(row, levels = c("MVMR,\nadjusted for PCSK9", "Univariable IVW,\nfor the two-step method")))
+pa <- ggplot(ldl, aes(x = estimate, y = row, colour = method)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey55") +
+  geom_errorbar(aes(xmin = lower, xmax = upper), width = 0.18, linewidth = 0.7, orientation = "y") +
+  geom_point(shape = 15, size = 3.2) +
+  facet_wrap(~setting, nrow = 1) +
+  scale_colour_manual(values = ink, guide = "none") +
+  scale_x_continuous(limits = c(0, 0.6), breaks = seq(0, 0.6, 0.1)) +
+  labs(x = "Log odds ratio for CAD per SD higher LDL-C", tag = "a") +
+  theme_fp
+
+total <- est %>% filter(quantity == "PCSK9 on CAD, total")
+parts <- est %>% filter(grepl("^(Indirect|Direct)", quantity))
+dec <- bind_rows(
+  total %>% mutate(setting = "Setting 1"),
+  total %>% mutate(setting = "Setting 2"),
+  parts
+) %>%
+  mutate(method = method_of(quantity),
+         component = sub(",.*$", "", quantity),
+         component = ifelse(component == "PCSK9 on CAD", "Total", component),
+         component = factor(component, levels = c("Total", "Indirect", "Direct")),
+         y = 4 - as.integer(component) + ifelse(method == "Two-step", 0.17, ifelse(method == "MVMR", -0.17, 0)))
+pb <- ggplot(dec, aes(x = estimate, y = y, colour = method)) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey55") +
+  geom_errorbar(aes(xmin = lower, xmax = upper), width = 0.12, linewidth = 0.7, orientation = "y") +
+  geom_point(shape = 15, size = 3.2) +
+  facet_wrap(~setting, nrow = 1) +
+  scale_colour_manual(values = ink, breaks = c("Total", "Two-step", "MVMR")) +
+  scale_y_continuous(breaks = 3:1, labels = c("Total", "Indirect", "Direct"), limits = c(0.6, 3.4)) +
+  scale_x_continuous(limits = c(-0.05, 0.3), breaks = seq(0, 0.3, 0.1)) +
+  labs(x = "Log odds ratio for CAD per SD higher PCSK9", tag = "b") +
+  theme_fp
+pa / pb + plot_layout(heights = c(1, 1.45))
+```
+
+# Correlations between instruments
+
+Supplementary Figure S1 uses the signed correlations of the 16 PCSK9 instruments and the nine Setting 2 LDL-C instruments within 10 Mb of the PCSK9 gene start. rs11591147 is in both sets, so 24 variants are shown. Asterisks mark the LDL-C instruments.
+
+```{r fig.width=12, fig.height=10.4}
+gene_start <- 55505221
+ldl_near <- s2$rsid[s2$chromosome == 1 & abs(s2$position - gene_start) <= 10e6]
+bim <- read.table("summary_results/region_snps.bim", sep = "\t", stringsAsFactors = FALSE,
+                  col.names = c("chr", "rsid", "cm", "bp", "a1", "a2"))
+mat <- as.matrix(read.table("summary_results/region_corr.ld", sep = "\t"))
+mat[upper.tri(mat)] <- t(mat)[upper.tri(mat)]
+rownames(mat) <- bim$rsid
+stopifnot(nrow(mat) == 24, setequal(bim$rsid, union(cis$rsid, ldl_near)))
+n <- nrow(mat)
+labels <- ifelse(bim$rsid %in% ldl_near, paste0(bim$rsid, "*"), bim$rsid)
+grid <- expand.grid(i = seq_len(n), j = seq_len(n))
+grid$r <- mat[cbind(grid$i, grid$j)]
+grid$y <- n + 1 - grid$i
+grid$label <- sprintf("%.2f", grid$r)
+ggplot(grid, aes(x = j, y = y, fill = r)) +
+  geom_tile(colour = "white", linewidth = 0.4) +
+  geom_text(aes(label = label, colour = abs(r) >= 0.65), size = 3.2, show.legend = FALSE) +
+  scale_fill_gradient2(low = "#2166ac", mid = "white", high = "#aa0202", midpoint = 0, limits = c(-1, 1), name = "r") +
+  scale_colour_manual(values = c("TRUE" = "white", "FALSE" = "black")) +
+  scale_x_continuous(breaks = seq_len(n), labels = labels, expand = c(0, 0)) +
+  scale_y_continuous(breaks = n:1, labels = labels, expand = c(0, 0)) +
+  coord_fixed() +
+  theme_classic(base_size = 12) +
+  theme(axis.text.x = element_text(size = 10, colour = "black", angle = 55, hjust = 1, vjust = 1),
+        axis.text.y = element_text(size = 10, colour = "black"),
+        axis.title = element_blank(), axis.ticks = element_blank())
+```
+
+```{r}
+off <- mat
+diag(off) <- NA
+hits <- which(abs(off) >= 0.3 & upper.tri(off), arr.ind = TRUE)
+data.frame(variant_1 = bim$rsid[hits[, 1]], variant_2 = bim$rsid[hits[, 2]], r = round(off[hits], 2))
+```
+
+Across the 394 Setting 2 LDL-C instruments, the largest absolute correlation is between variants on different chromosomes. Pairs inside the 10 Mb clump window were already required to have r² below 0.001.
+
+```{r}
+lbim <- read.table("summary_results/ldl_snps.bim", sep = "\t", stringsAsFactors = FALSE,
+                   col.names = c("chr", "rsid", "cm", "bp", "a1", "a2"))
+gmat <- as.matrix(read.table("summary_results/ldl_corr.ld", sep = "\t"))
+gmat[upper.tri(gmat)] <- t(gmat)[upper.tri(gmat)]
+diag(gmat) <- NA
+k <- which.max(abs(gmat))
+ij <- arrayInd(k, dim(gmat))
+data.frame(
+  variant_1 = lbim$rsid[ij[1]], chromosome_1 = lbim$chr[ij[1]],
+  variant_2 = lbim$rsid[ij[2]], chromosome_2 = lbim$chr[ij[2]],
+  r = round(gmat[k], 2)
+)
+```
