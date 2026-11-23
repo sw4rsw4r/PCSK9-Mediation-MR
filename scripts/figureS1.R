@@ -1,6 +1,6 @@
 # Supplementary Figure S1: correlations (r) between the 16 PCSK9 instruments and the Setting 2 LDL-C
 # instruments within 10 Mb of PCSK9 (24 variants, 1000 Genomes EUR), the matrix used in the estimation.
-# Inputs: summary_results/. Output: results/figures/FigureS1.png.
+# Inputs: summary_results/. Output: results/figures/FigureS1.png and FigureS1.pdf.
 # Run from the repository root: Rscript scripts/figureS1.R
 suppressMessages(library(ggplot2))
 
@@ -42,4 +42,5 @@ p3 <- ggplot(grid, aes(x = j, y = y, fill = r)) +
         axis.title = element_blank(), axis.ticks = element_blank(),
         legend.title = element_text(size = 12), plot.margin = margin(10, 14, 10, 10))
 ggsave(file.path(out_dir, "FigureS1.png"), p3, width = 12.4, height = 10.6, units = "in", dpi = 220, bg = "white")
-cat("wrote", file.path(out_dir, "FigureS1.png"), "\n")
+ggsave(file.path(out_dir, "FigureS1.pdf"), p3, width = 12.4, height = 10.6, units = "in", device = "pdf", bg = "white")
+cat("wrote", file.path(out_dir, "FigureS1.png"), "and FigureS1.pdf\n")
