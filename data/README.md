@@ -29,3 +29,14 @@ plink --bfile results/window/eur_window --r square --out results/window/eur_wind
 ```
 
 `scripts/extract_pcsk9_window.py` writes `overlap_rsids.txt` next to the overlap table.
+
+The two correlation matrices in `summary_results` were computed with PLINK in the same reference panel. `region_corr.ld` covers the 16 PCSK9 instruments and the Setting 2 LDL-C instruments within 10 Mb of the PCSK9 gene start (chromosome 1, 55,505,221 on GRCh37), 24 variants in all; `ldl_corr.ld` covers the 394 LDL-C instruments. The `.bim` files list the variants in matrix order. PLINK reports r for allele A1, and the scripts align each r to the LDL-C effect allele.
+
+```bash
+plink --bfile data/raw/1000G_EUR --extract region_rsids.txt --make-bed --out results/region_snps
+plink --bfile results/region_snps --r square0 --out results/region_corr
+plink --bfile data/raw/1000G_EUR --extract ldl_rsids.txt --make-bed --out results/ldl_snps
+plink --bfile results/ldl_snps --r square0 --out results/ldl_corr
+```
+
+With these tables in place, `python scripts/estimate_effects.py` writes the estimates to `results/estimates`.

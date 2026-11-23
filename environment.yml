@@ -1,0 +1,21 @@
+# Software for the PCSK9 -> LDL-C -> CAD mediation analysis.
+#   conda env create -f environment.yml
+#   On Windows, then run:  powershell -File scripts/setup_env_windows.ps1   (see that script)
+# PLINK v1.90b7.7 is used as a separate binary for clumping and LD (no Windows build on bioconda).
+name: pcsk9-mr
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12.9
+  - numpy=2.5.1
+  - scipy=1.18.0
+  - pandas=3.0.3
+  - r-base=4.5.3
+  - r-mendelianrandomization=0.10.0
+  - r-ggplot2=4.0.4
+  - r-jsonlite=2.0.0
+  - r-rmarkdown=2.32
+  - r-knitr=1.52
+  - pandoc=3.14
+  # OpenBLAS rather than MKL for the BLAS used by NumPy and R.
+  - libblas=*=*openblas

@@ -24,3 +24,7 @@ CLUMPED = CLUMP_DIR / "ldl_clump.clumped"
 WINDOW_DIR = RESULTS / "window"
 SETTING1 = RESULTS / "setting1"
 SETTING2 = RESULTS / "setting2"
+
+# Variant-level tables shipped with the repository, and the estimates written from them.
+SUMMARY = ROOT / "summary_results"
+ESTIMATES_DIR = RESULTS / "estimates"
